@@ -9,7 +9,7 @@ def conectar():
 
 def criar_tabelas():
     sql = """
-    -- Tabela de produtos (objeto-relacional)
+    -- Tabela de produtos
     CREATE TABLE IF NOT EXISTS produto (
       id SERIAL PRIMARY KEY,
       nome VARCHAR(100) NOT NULL,
@@ -19,19 +19,16 @@ def criar_tabelas():
       estoque INT
     );
 
-    -- Tabela de vendas operacionais
-    CREATE TABLE IF NOT EXISTS venda (
-      id SERIAL PRIMARY KEY,
-      produto_id INT REFERENCES produto(id),
-      quantidade INT NOT NULL,
-      valor_total NUMERIC(12,2),
-      data_venda DATE NOT NULL
-    );
-
-    -- Dimensão tempo
+    -- Dimensão tempo com timestamp incluindo hora, minuto e segundo
     CREATE TABLE IF NOT EXISTS dim_tempo (
-      data DATE PRIMARY KEY,
-      ano INT, mes INT, dia INT, trimestre INT
+      data_hora TIMESTAMP PRIMARY KEY,
+      ano INT,
+      mes INT,
+      dia INT,
+      hora INT,
+      minuto INT,
+      segundo INT,
+      trimestre INT
     );
 
     -- Dimensão local
@@ -43,14 +40,16 @@ def criar_tabelas():
       UNIQUE (cidade, estado, pais)
     );
 
-    -- Fato vendas com localização
+    -- Fato vendas com campos temporais de criação e atualização da venda
     CREATE TABLE IF NOT EXISTS fato_venda (
       id SERIAL PRIMARY KEY,
-      data DATE REFERENCES dim_tempo(data),
+      data_hora TIMESTAMP REFERENCES dim_tempo(data_hora),
       produto_id INT,
       quantidade INT,
       valor_total NUMERIC(12,2),
-      local_id INT REFERENCES dim_local(id)
+      local_id INT REFERENCES dim_local(id),
+      data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      data_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """
     conn = conectar()
@@ -59,12 +58,11 @@ def criar_tabelas():
             cur.execute(sql)
     conn.close()
 
-
 def inserir_produto(prod):
     conn = conectar()
     sql = """
-      INSERT INTO produto (nome,categoria,marca,preco,estoque)
-      VALUES (%s,%s,%s,%s,%s) RETURNING id;
+      INSERT INTO produto (nome, categoria, marca, preco, estoque)
+      VALUES (%s, %s, %s, %s, %s) RETURNING id;
     """
     with conn:
         with conn.cursor() as cur:
@@ -73,37 +71,32 @@ def inserir_produto(prod):
     conn.close()
     return pid
 
-def registrar_venda(pid, qtd, total, data, cidade, estado, pais):
+def registrar_venda(pid, qtd, total, data_hora, cidade, estado, pais):
     conn = conectar()
     with conn:
         with conn.cursor() as cur:
-            # 1. Registrar venda operacional
+            # Atualizar dimensão tempo incluindo hora, minuto, segundo
             cur.execute(
                 """
-                INSERT INTO venda
-                  (produto_id, quantidade, valor_total, data_venda)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (pid, qtd, total, data),
-            )
-
-            # 2. Atualizar dimensão tempo
-            cur.execute(
-                """
-                INSERT INTO dim_tempo (data, ano, mes, dia, trimestre)
+                INSERT INTO dim_tempo (
+                  data_hora, ano, mes, dia, hora, minuto, segundo, trimestre
+                )
                 VALUES (
                   %s,
-                  EXTRACT(YEAR FROM %s::date),
-                  EXTRACT(MONTH FROM %s::date),
-                  EXTRACT(DAY FROM %s::date),
-                  EXTRACT(QUARTER FROM %s::date)
+                  EXTRACT(YEAR FROM %s::timestamp),
+                  EXTRACT(MONTH FROM %s::timestamp),
+                  EXTRACT(DAY FROM %s::timestamp),
+                  EXTRACT(HOUR FROM %s::timestamp),
+                  EXTRACT(MINUTE FROM %s::timestamp),
+                  EXTRACT(SECOND FROM %s::timestamp),
+                  EXTRACT(QUARTER FROM %s::timestamp)
                 )
-                ON CONFLICT (data) DO NOTHING
+                ON CONFLICT (data_hora) DO NOTHING
                 """,
-                (data, data, data, data, data),
+                (data_hora, data_hora, data_hora, data_hora, data_hora, data_hora, data_hora, data_hora)
             )
 
-            # 3. Atualizar dimensão local
+            # Atualizar dimensão local
             cur.execute(
                 """
                 INSERT INTO dim_local (cidade, estado, pais)
@@ -113,7 +106,7 @@ def registrar_venda(pid, qtd, total, data, cidade, estado, pais):
                 (cidade, estado, pais),
             )
 
-            # 4. Obter id da localização
+            # Obter id da localização
             cur.execute(
                 """
                 SELECT id FROM dim_local
@@ -123,24 +116,29 @@ def registrar_venda(pid, qtd, total, data, cidade, estado, pais):
             )
             id_local = cur.fetchone()[0]
 
-            # 5. Inserir fato de venda
+            # Inserir fato de venda com timestamp temporal e datas de criação/atualização
             cur.execute(
                 """
-                INSERT INTO fato_venda (data, produto_id, quantidade, valor_total, local_id)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO fato_venda (
+                  data_hora, produto_id, quantidade, valor_total, local_id,
+                  data_criacao, data_atualizacao
+                )
+                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-                (data, pid, qtd, total, id_local),
+                (data_hora, pid, qtd, total, id_local),
             )
     conn.close()
 
-def fetch_vendas_por_trimestre():
+def fetch_vendas_por_hora():
     conn = conectar()
     sql = """
-      SELECT ano, trimestre, SUM(valor_total) AS total
+      SELECT
+        ano, mes, dia, hora,
+        SUM(valor_total) AS total_vendas
       FROM fato_venda
-      JOIN dim_tempo USING(data)
-      GROUP BY ano, trimestre
-      ORDER BY ano, trimestre;
+      JOIN dim_tempo USING(data_hora)
+      GROUP BY ano, mes, dia, hora
+      ORDER BY ano, mes, dia, hora;
     """
     with conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -150,6 +148,7 @@ def fetch_vendas_por_trimestre():
     return rows
 
 if __name__ == "__main__":
-    print("▶️ Rodando script...")
+    print("▶️ Rodando script temporal...")
     criar_tabelas()
     print("✅ Tabelas criadas com sucesso.")
+
