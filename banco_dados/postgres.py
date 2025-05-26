@@ -2,14 +2,15 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from config import POSTGRES
 
+# Conectar ao banco
 def conectar():
     conn = psycopg2.connect(**POSTGRES)
     print("🔌 Conectado ao banco:", conn.get_dsn_parameters()["dbname"])
     return conn
 
+# Criar tabelas
 def criar_tabelas():
     sql = """
-    -- Tabela de produtos
     CREATE TABLE IF NOT EXISTS produto (
       id SERIAL PRIMARY KEY,
       nome VARCHAR(100) NOT NULL,
@@ -19,7 +20,6 @@ def criar_tabelas():
       estoque INT
     );
 
-    -- Dimensão tempo com timestamp incluindo hora, minuto e segundo
     CREATE TABLE IF NOT EXISTS dim_tempo (
       data_hora TIMESTAMP PRIMARY KEY,
       ano INT,
@@ -31,7 +31,6 @@ def criar_tabelas():
       trimestre INT
     );
 
-    -- Dimensão local
     CREATE TABLE IF NOT EXISTS dim_local (
       id SERIAL PRIMARY KEY,
       cidade VARCHAR(100),
@@ -40,7 +39,6 @@ def criar_tabelas():
       UNIQUE (cidade, estado, pais)
     );
 
-    -- Fato vendas com campos temporais de criação e atualização da venda
     CREATE TABLE IF NOT EXISTS fato_venda (
       id SERIAL PRIMARY KEY,
       data_hora TIMESTAMP REFERENCES dim_tempo(data_hora),
@@ -58,6 +56,7 @@ def criar_tabelas():
             cur.execute(sql)
     conn.close()
 
+# Inserir produto
 def inserir_produto(prod):
     conn = conectar()
     sql = """
@@ -71,11 +70,11 @@ def inserir_produto(prod):
     conn.close()
     return pid
 
+# Registrar venda
 def registrar_venda(pid, qtd, total, data_hora, cidade, estado, pais):
     conn = conectar()
     with conn:
         with conn.cursor() as cur:
-            # Atualizar dimensão tempo incluindo hora, minuto, segundo
             cur.execute(
                 """
                 INSERT INTO dim_tempo (
@@ -96,7 +95,6 @@ def registrar_venda(pid, qtd, total, data_hora, cidade, estado, pais):
                 (data_hora, data_hora, data_hora, data_hora, data_hora, data_hora, data_hora, data_hora)
             )
 
-            # Atualizar dimensão local
             cur.execute(
                 """
                 INSERT INTO dim_local (cidade, estado, pais)
@@ -106,7 +104,6 @@ def registrar_venda(pid, qtd, total, data_hora, cidade, estado, pais):
                 (cidade, estado, pais),
             )
 
-            # Obter id da localização
             cur.execute(
                 """
                 SELECT id FROM dim_local
@@ -116,7 +113,6 @@ def registrar_venda(pid, qtd, total, data_hora, cidade, estado, pais):
             )
             id_local = cur.fetchone()[0]
 
-            # Inserir fato de venda com timestamp temporal e datas de criação/atualização
             cur.execute(
                 """
                 INSERT INTO fato_venda (
@@ -129,6 +125,7 @@ def registrar_venda(pid, qtd, total, data_hora, cidade, estado, pais):
             )
     conn.close()
 
+# Consulta de vendas por hora
 def fetch_vendas_por_hora():
     conn = conectar()
     sql = """
@@ -147,8 +144,69 @@ def fetch_vendas_por_hora():
     conn.close()
     return rows
 
-if __name__ == "__main__":
-    print("▶️ Rodando script temporal...")
-    criar_tabelas()
-    print("✅ Tabelas criadas com sucesso.")
+# 🔍 Dados para previsão
+def get_dados_para_previsao():
+    conn = conectar()
+    sql = """
+      SELECT
+        EXTRACT(YEAR FROM data_hora) AS ano,
+        EXTRACT(MONTH FROM data_hora) AS mes,
+        EXTRACT(DAY FROM data_hora) AS dia,
+        EXTRACT(HOUR FROM data_hora) AS hora,
+        SUM(valor_total) AS total_vendas
+      FROM fato_venda
+      GROUP BY ano, mes, dia, hora
+      ORDER BY ano, mes, dia, hora;
+    """
+    with conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+    conn.close()
+    return rows
 
+# 📈 Previsão de vendas
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+import numpy as np
+import matplotlib.pyplot as plt
+
+def prever_vendas():
+    """
+    Usa regressão linear simples para prever vendas com base no tempo (hora sequencial).
+    """
+    dados = get_dados_para_previsao()
+    if not dados:
+        print("⚠️ Nenhum dado encontrado para previsão.")
+        return
+
+    df = pd.DataFrame(dados)
+    df["tempo"] = np.arange(len(df))  # tempo como sequência
+    X = df[["tempo"]]
+    y = df["total_vendas"]
+
+    modelo = LinearRegression()
+    modelo.fit(X, y)
+
+    futuro_tempo = np.arange(len(df), len(df) + 5).reshape(-1, 1)
+    previsoes = modelo.predict(futuro_tempo)
+
+    print("📊 Previsões para os próximos 5 períodos:")
+    for i, p in enumerate(previsoes):
+        print(f"Período +{i+1}: R$ {p:.2f}")
+
+    # Exibir gráfico
+    plt.plot(df["tempo"], y, label="Histórico")
+    plt.plot(futuro_tempo, previsoes, label="Previsão", linestyle="--")
+    plt.xlabel("Tempo (período)")
+    plt.ylabel("Total de Vendas")
+    plt.legend()
+    plt.title("Previsão de Vendas (Regressão Linear)")
+    plt.grid(True)
+    plt.show()
+
+# Execução direta
+if __name__ == "__main__":
+    print("▶️ Rodando script com previsão de vendas...")
+    criar_tabelas()
+    prever_vendas()
